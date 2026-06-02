@@ -1,8 +1,8 @@
 python-telegram-bot[webhooks]
 python-dotenv
-psycopg2-binary
-Pillow
 requests
 psutil
 pytz
 google-genai
+xai-sdk
+openai
