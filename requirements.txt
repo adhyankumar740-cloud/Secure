@@ -1,8 +1,6 @@
 python-telegram-bot[webhooks]
 python-dotenv
 requests
-psutil
-pytz
-google-genai
-xai-sdk
 openai
+groq
+better-profanity==0.7.0
