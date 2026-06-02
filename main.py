@@ -7,7 +7,7 @@ import logging
 import unicodedata
 import aiosqlite
 import telegram
-import httpx  # Required for Perspective API calls
+import httpx  # Required for Perspective API and webhook keeping
 from collections import defaultdict
 from dotenv import load_dotenv
 
@@ -30,17 +30,23 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI  # Groq uses OpenAI compatible client
 
 # ------------------------------------------------------------------
 # CONFIGURATION & ENVIRONMENT SETUP
 # ------------------------------------------------------------------
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROK_API_KEY = os.getenv("GROK_API_KEY")
-PERSPECTIVE_API_KEY = os.getenv("PERSPECTIVE_API_KEY") # Add this in your .env file
+PERSPECTIVE_API_KEY = os.getenv("PERSPECTIVE_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-2-1212")
+
+# GROQ SPECIFIC CONFIGURATION
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile") 
+
+# WEBHOOK CONFIGURATION FOR RENDER
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", "8000"))
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -64,21 +70,23 @@ join_cache = defaultdict(list)
 lockdown_state = defaultdict(bool)
 captcha_registry = defaultdict(dict)
 
-# Grok AI SDK Configuration
-ai_client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.xai.com/v1") if GROK_API_KEY else None
+# Groq AI SDK Configuration (Using OpenAI wrapper pointed to Groq)
+ai_client = AsyncOpenAI(
+    api_key=GROQ_API_KEY, 
+    base_url="https://api.groq.com/openai/v1"
+) if GROQ_API_KEY else None
 
 # ------------------------------------------------------------------
 # GOOGLE PERSPECTIVE API (Hinglish/Hindi/English Specialist)
 # ------------------------------------------------------------------
 async def check_perspective_toxicity(text: str) -> float:
-    """Calls Google's free Perspective API to catch slang, toxicity, and multi-lingual bad words."""
     if not PERSPECTIVE_API_KEY or not text.strip():
         return 0.0
     
     url = f"https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key={PERSPECTIVE_API_KEY}"
     payload = {
         "comment": {"text": text},
-        "languages": ["en", "hi"],  # Forces support for Hindi, English, and Romanized Hinglish
+        "languages": ["en", "hi"],
         "requestedAttributes": {"TOXICITY": {}, "SEVERE_TOXICITY": {}, "INSULT": {}}
     }
     
@@ -87,7 +95,6 @@ async def check_perspective_toxicity(text: str) -> float:
             response = await client.post(url, json=payload, timeout=3.0)
             if response.status_code == 200:
                 data = response.json()
-                # Get the highest score among the targeted bad attributes
                 scores = [
                     data["attributeScores"]["TOXICITY"]["summaryScore"]["value"],
                     data["attributeScores"]["SEVERE_TOXICITY"]["summaryScore"]["value"],
@@ -108,14 +115,6 @@ def can_delete_messages(member) -> bool:
 def can_ban_members(member) -> bool:
     if isinstance(member, ChatMemberOwner): return True
     return bool(getattr(member, 'can_ban_users', False) or getattr(member, 'can_restrict_members', False))
-
-def can_restrict_members(member) -> bool:
-    if isinstance(member, ChatMemberOwner): return True
-    return bool(getattr(member, 'can_restrict_members', False))
-
-def can_manage_chat_permissions(member) -> bool:
-    if isinstance(member, ChatMemberOwner): return True
-    return bool(getattr(member, 'can_manage_chat', False) or getattr(member, 'can_change_info', False))
 
 # ------------------------------------------------------------------
 # LOCAL SQLITE DATABASE LAYER
@@ -322,7 +321,8 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             await context.bot.send_message(chat_id, f"🛑 <b>Permanent Ban:</b> {username}\n<b>Reason:</b> {reason} (Warnings Exhausted)", parse_mode=ParseMode.HTML)
         except TelegramError: pass
 
-async def evaluate_via_grok(text: str) -> dict:
+async def evaluate_via_groq(text: str) -> dict:
+    """Uses Groq Cloud API endpoint for extremely fast scanning."""
     if not ai_client: return {"violation": False, "action": "ignore"}
     prompt = (
         "You are an automated chat defense filter. Check this text for advanced stealth scams, "
@@ -332,12 +332,16 @@ async def evaluate_via_grok(text: str) -> dict:
     )
     try:
         res = await ai_client.chat.completions.create(
-            model=GROK_MODEL, response_format={"type": "json_object"},
+            model=GROQ_MODEL, 
+            response_format={"type": "json_object"}, # Groq supports JSON mode for Llama-3 models
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
-            max_tokens=120, temperature=0.0
+            max_tokens=120, 
+            temperature=0.0
         )
         return json.loads(res.choices[0].message.content)
-    except Exception: return {"violation": False, "action": "ignore"}
+    except Exception as e: 
+        logger.error(f"Groq evaluation error: {e}")
+        return {"violation": False, "action": "ignore"}
 
 # ------------------------------------------------------------------
 # CORE INGESTION TRIAGE ENGINE
@@ -373,37 +377,35 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
     link_violation = scan_entities_for_links(msg, raw_text) or scan_obfuscated_links(raw_text)
     if link_violation: return await execute_local_punishment(context, chat.id, user.id, msg.message_id, link_violation, username)
 
-    # Rate limiting calculations
     flood_cache[chat.id][user.id].append(now)
     if len([t for t in flood_cache[chat.id][user.id] if now - t < 4.0]) >= 5:
         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Text Burst Flood", username, immediate_ban=True)
 
-    # --- TIER 2: GOOGLE PERSPECTIVE WEB API (Free Hindi/Hinglish Bad Word Detection) ---
+    # --- TIER 2: GOOGLE PERSPECTIVE WEB API ---
     if PERSPECTIVE_API_KEY and len(raw_text.strip()) > 2:
         toxicity_score = await check_perspective_toxicity(raw_text)
-        if toxicity_score > 0.82:  # If confidence over 82% that it contains multi-lingual slangs/insults
+        if toxicity_score > 0.82:
             return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"Multi-lingual Slang API Trigger ({int(toxicity_score*100)}%)", username)
 
-    # --- TIER 3: GROK AI DEEP CONTEXT EVALUATION (Escalation Gateway) ---
+    # --- TIER 3: GROQ AI DEEP CONTEXT EVALUATION ---
     if ai_client and len(raw_text.strip()) > 6:
-        ai_res = await evaluate_via_grok(raw_text)
+        ai_res = await evaluate_via_groq(raw_text)
         if ai_res.get("violation") and ai_res.get("confidence", 0) >= 80:
             action = ai_res.get("action", "ban")
-            reason = f"Grok Flagged: {ai_res.get('reason')}"
+            reason = f"Groq AI Flagged: {ai_res.get('reason')}"
             
-            # Autonomous handling inside the code framework without human intervention
             try: await context.bot.delete_message(chat.id, msg.message_id)
             except TelegramError: pass
             
             if action == "ban":
                 await context.bot.ban_chat_member(chat.id, user_id=user.id)
                 await db_layer.log_action(chat_id, user.id, 0, "AI_AUTONOMOUS_BAN", reason)
-                await context.bot.send_message(chat_id, f"🛑 <b>Autonomous AI Ban Executed</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
+                await context.bot.send_message(chat_id, f"🛑 <b>Autonomous Groq AI Ban Executed</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
             elif action == "mute":
                 until = int(time.time()) + 3600
                 await context.bot.restrict_chat_member(chat_id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
                 await db_layer.log_action(chat_id, user.id, 0, "AI_AUTONOMOUS_MUTE", reason)
-                await context.bot.send_message(chat_id, f"🔇 <b>Autonomous AI Mute Applied (1Hr)</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
+                await context.bot.send_message(chat_id, f"🔇 <b>Autonomous Groq AI Mute Applied (1Hr)</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
 
 # ------------------------------------------------------------------
 # SYSTEM GATEKEEPERS & RECOVERY INITIALIZERS
@@ -470,12 +472,29 @@ async def post_startup_validation(app: Application):
     logger.info("🛡️ Multi-Tier Hybrid Production Core Firewall Activated.")
 
 def main():
-    if not TELEGRAM_BOT_TOKEN: return
+    if not TELEGRAM_BOT_TOKEN: 
+        logger.error("Bhai, TELEGRAM_BOT_TOKEN missing hai!")
+        return
+        
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_startup_validation).build()
+    
+    # Handlers Setup
     app.add_handler(CallbackQueryHandler(process_gate_callback, pattern=r"^gate_"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, gatekeeper_join_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND, ingestion_pipeline))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # WEBHOOK OR POLLING DEPLOYMENT LOGIC (RENDER SAFE)
+    if WEBHOOK_URL:
+        logger.info(f"🛡️ Starting bot with WEBHOOK on port {PORT}...")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+        )
+    else:
+        logger.info("🛡️ Starting bot with POLLING (Local Environment)...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
