@@ -42,7 +42,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # GROQ SPECIFIC CONFIGURATION
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile") 
+GROQ_MODEL = os.getenv("GROQ_MODEL", "Llama-3.1-8b-instant") 
 
 # WEBHOOK CONFIGURATION FOR RENDER
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
