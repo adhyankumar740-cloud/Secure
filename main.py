@@ -209,36 +209,36 @@ db_layer = DatabaseLayer()
 class UnicodeObfuscationEngine:
     @staticmethod
     def deep_clean_and_normalize(text: str) -> tuple:
-        """Strips hidden tokens, decodes homoglyphs, and checks entropy."""
+        """Strips hidden tokens, decodes homoglyphs, and checks entropy safely."""
         if not text: return "", 0.0, 0
         
         # Strip hidden zero-width and control tokens
         text = re.sub(r'[\u200B-\u200D\uFEFF\x00-\x1F\x7F\u202E]', '', text)
         normalized = unicodedata.normalize('NFKC', text)
         
-        # Map structural homoglyphs and mathematical alphanumerics
         builder = []
-        mixed_scripts_detected = 0
-        last_script = None
+        detected_scripts = set() # Unique scripts track karne ke liye set
         
         for char in normalized:
             low_char = char.lower()
             resolved_char = HOMOGLYPH_MAP.get(low_char, low_char)
             builder.append(resolved_char)
             
-            # Detect script switching vectors (mixed script attacks)
+            # Sirf conflicting core scripts ko check karna
             try:
-                current_script = unicodedata.name(char).split()[0]
-                if last_script and current_script != last_script and current_script in ['CYRILLIC', 'LATIN', 'GREEK']:
-                    mixed_scripts_detected += 1
-                last_script = current_script
+                script_name = unicodedata.name(char).split()[0]
+                if script_name in ['CYRILLIC', 'GREEK', 'LATIN']:
+                    detected_scripts.add(script_name)
             except ValueError:
                 pass
 
         cleaned_text = "".join(builder)
         structural_text = re.sub(r'[\s\W_]+', '', cleaned_text)
         
-        # Calculate text Shannon entropy to catch randomized alphanumeric bypass strings
+        # Agar pure message me LATIN aur CYRILLIC dono unique scripts milenge tabhi mix count hoga
+        mixed_scripts_detected = len(detected_scripts) if len(detected_scripts) > 1 else 0
+        
+        # Calculate text Shannon entropy
         entropy = 0.0
         if structural_text:
             distribution = defaultdict(int)
@@ -246,6 +246,10 @@ class UnicodeObfuscationEngine:
             entropy = -sum((count / len(structural_text)) * math.log2(count / len(structural_text)) for count in distribution.values())
 
         return cleaned_text, entropy, mixed_scripts_detected
+
+
+
+
 
 # ------------------------------------------------------------------
 # LAYER 2: BEHAVIORAL PROFILING, RISK SYSTEMS & INVITE MONITOR
@@ -495,11 +499,13 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # --- BLOCK 3: ADVANCED UNICODE DE-OBFUSCATION EXTRAPOLATION ---
     cleaned_text, entropy, mixed_scripts = UnicodeObfuscationEngine.deep_clean_and_normalize(raw_payload_text)
     
-    # Intercept extreme obfuscation vectors or unusual char distributions
-    if mixed_scripts > 3 and trust_score < 60.0:
-         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"Homoglyph Obfuscation Payload ({mixed_scripts} script splits)", username)
-    if entropy > 5.2 and len(cleaned_text) > 20 and trust_score < 50.0:
-         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"High Entropy Randomized Bypass String Match ({entropy:.2f})", username)
+    # Bada paragraph (len > 350) hone par bypass filter safe rahega aur false ban nahi karega
+    if mixed_scripts >= 2 and len(raw_payload_text) < 350 and trust_score < 60.0:
+         return await execute_local_punishment(context, chat_id, user_id, msg_id, f"Homoglyph Obfuscation Payload ({mixed_scripts} distinct scripts mixed)", username)
+         
+    if entropy > 5.2 and len(cleaned_text) > 20 and len(raw_payload_text) < 350 and trust_score < 50.0:
+         return await execute_local_punishment(context, chat_id, user_id, msg_id, f"High Entropy Randomized Bypass String Match ({entropy:.2f})", username)
+
 
     # --- BLOCK 4: REINFORCED REGEX LOCAL ENFORCEMENT MATCH ---
     if PROFANITY_REGEX.search(cleaned_text) or PROFANITY_REGEX.search(raw_payload_text):
