@@ -442,6 +442,27 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
     raw_payload_text = msg.text or msg.caption or ""
     filename = msg.document.file_name if msg.document else ""
     
+    # --- VOICE NOTE & AUDIO PARSING UPGRADE (GROQ_2 MATRIX) ---
+    if (msg.voice or msg.audio) and groq_2:
+        audio_target = msg.voice if msg.voice else msg.audio
+        try:
+            tg_file = await context.bot.get_file(audio_target.file_id)
+            temp_audio_path = f"voice_{audio_target.file_unique_id}.ogg"
+            await tg_file.download_to_drive(temp_audio_path)
+            
+            with open(temp_audio_path, "rb") as audio_file:
+                transcription = await groq_2.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=audio_file
+                )
+            raw_payload_text = transcription.text
+            logger.info(f"🎙️ Transcribed Voice Note from {user.id}: '{raw_payload_text}'")
+            
+            if os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+        except Exception as audio_err:
+            logger.error(f"Failed processing voice matrix channel: {audio_err}")
+    # ==============================
     # Deduplicate Media Payloads using Telegram file unique signatures
     media_unique_id = None
     if msg.photo: media_unique_id = msg.photo[-1].file_unique_id
@@ -815,7 +836,7 @@ def main():
     app.add_handler(CommandHandler("analytics", analytics_command_handler))
     app.add_handler(CallbackQueryHandler(process_gate_callback, pattern=r"^gate_"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, gatekeeper_join_handler))
-    app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND | filters.PHOTO | filters.VIDEO | filters.Document.ALL, ingestion_pipeline))
+    app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE | filters.AUDIO, ingestion_pipeline))
     
     if WEBHOOK_URL:
         logger.info(f"🛡️ Launching Webhook Core Layer on port {PORT}...")
