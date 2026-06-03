@@ -767,46 +767,48 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"❗ <i>Notice: Phantom Matrix is watching you. Next strike issues an automated permanent termination.</i>"
         )
-        # 1. Normal text card warning message send karna
+        # 1. Text card warning message send karna
         await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
 
-        # 2. --- PHANTOM DYNAMIC VOICE WITH ULTRA FALLBACK MATRIX ---
+        # 2. --- PHANTOM ENGLISH MALE VOICE CORE SYSTEM ---
         try:
-            # Name se '@' hatana aur XML special characters ko saaf karna taaki Microsoft block na kare
+            import edge_tts
+            
+            # XML characters filter out karna taaki server block na kare
             clean_name = username.replace("@", "")
             clean_name = re.sub(r'[<&>"\']', '', clean_name)
+            if not clean_name.strip():
+                clean_name = "User"
             
-            # Phantom Deluxe Swag Script
-            tts_text = f"Halt! {clean_name}. Tum Phantom Deluxe Security Matrix ke radar par ho. Niyam todne ki galti dobara mat karna. Yeh tumhara pehla warning strike hai. Agli baar, seedha game over."
+            # Phantom Deluxe Swag Script in Full English
+            tts_text = f"Halt, {clean_name}! You are now on the radar of the Phantom Deluxe Security Matrix. Do not violate the group protocols again. This is your first warning strike. Next time, it is an immediate permanent termination. Game over."
             
             temp_mp3_path = f"warn_{user_id}_{int(time.time())}.mp3"
             audio_generated = False
             
-            # TIER 1: Try Phantom Male Voice (Microsoft Edge TTS)
+            # TIER 1: Ultra Deep US Cyber-Male Voice ('en-US-BrianNeural')
             try:
-                import edge_tts
-                communicate = edge_tts.Communicate(tts_text, "hi-IN-MadhuramNeural")
+                communicate = edge_tts.Communicate(tts_text, "en-US-BrianNeural")
                 await communicate.save(temp_mp3_path)
                 audio_generated = True
-                logger.info("⚡ Phantom Male Voice generated successfully via Edge-TTS.")
+                logger.info("⚡ English Phantom Male Voice generated successfully via Edge-TTS.")
             except Exception as e1:
-                logger.warning(f"Edge Male Voice blocked or failed: {e1}. Trying Edge Female Voice...")
+                logger.warning(f"Edge US Male Voice failed: {e1}. Trying Deep British Villain Male Voice...")
                 
-                # TIER 2: Secondary Edge Voice Try
+                # TIER 2: Sophisticated British Male Voice Backup ('en-GB-RyanNeural')
                 try:
-                    import edge_tts
-                    communicate = edge_tts.Communicate(tts_text, "hi-IN-SwaraNeural")
+                    communicate = edge_tts.Communicate(tts_text, "en-GB-RyanNeural")
                     await communicate.save(temp_mp3_path)
                     audio_generated = True
-                    logger.info("⚡ Edge Female Voice generated as backup.")
+                    logger.info("⚡ Backup English British Male Voice generated successfully.")
                 except Exception as e2:
-                    logger.warning(f"Edge TTS completely blocked by Microsoft on this IP: {e2}. Switching to Google Core...")
+                    logger.error(f"Edge TTS completely blocked by cloud network: {e2}. Switching to Google English Baseline...")
 
-            # TIER 3: Absolute Bulletproof Fallback (Google TTS - Never Fails)
+            # TIER 3: Bulletproof English Baseline (Google TTS - Safeguard)
             if not audio_generated:
                 params = {
                     "ie": "UTF-8",
-                    "tl": "hi",
+                    "tl": "en",
                     "client": "tw-ob",
                     "q": tts_text
                 }
@@ -816,11 +818,9 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                         with open(temp_mp3_path, "wb") as f:
                             f.write(response.content)
                         audio_generated = True
-                        logger.info("⚡ Audio successfully generated via Bulletproof Google Core.")
-                    else:
-                        logger.error(f"Google Core TTS also rejected request with status: {response.status_code}")
+                        logger.info("⚡ Audio successfully generated via English Google Core.")
 
-            # Safe Audio dispatch system
+            # Audio output channel dispatcher
             if audio_generated and os.path.exists(temp_mp3_path):
                 with open(temp_mp3_path, "rb") as audio_file:
                     await context.bot.send_audio(
@@ -854,10 +854,6 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             )
             await context.bot.send_message(chat_id, ban_content, parse_mode=ParseMode.HTML)
         except TelegramError: pass
-
-
-
-
 
 
 
