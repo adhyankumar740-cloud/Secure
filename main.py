@@ -44,7 +44,7 @@ PERSPECTIVE_API_KEY = os.getenv("PERSPECTIVE_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192") 
+GROQ_MODEL = os.getenv("GROQ_MODEL", "Llama-3.1-8b-instant") 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
