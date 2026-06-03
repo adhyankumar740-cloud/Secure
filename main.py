@@ -767,7 +767,55 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"❗ <i>Notice: Suspend activity immediately. Next strike issues an automated permanent ban structure.</i>"
         )
+        # 1. Pehle normal text card warning jayegi
         await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
+
+        # 2. --- 100% FREE GOOGLE DYNAMIC VOICE WARNING ---
+        try:
+            # Username se '@' hata dete hain taaki Google AI "at the rate" na bole, seedha naam bole
+            clean_name = username.replace("@", "")
+            
+            # Jo bot bol kar sunayega (Hindi/Hinglish Text)
+            tts_text = f"Suno {clean_name}, tum group ke niyam tod rahe ho. Yeh tumhari pehli warning hai, agli baar seedha ban ho jaoge."
+            
+            # Google Translate Free TTS API parameters
+            params = {
+                "ie": "UTF-8",
+                "tl": "hi",  # Clean Hindi Awaaz
+                "client": "tw-ob",
+                "q": tts_text
+            }
+            
+            # Bina kisi API key ke network request marna
+            async with httpx.AsyncClient() as client:
+                response = await client.get("https://translate.google.com/translate_tts", params=params, timeout=6.0)
+                
+                if response.status_code == 200:
+                    temp_mp3_path = f"warn_{user_id}_{int(time.time())}.mp3"
+                    
+                    # File ko temporary server par save karna
+                    with open(temp_mp3_path, "wb") as f:
+                        f.write(response.content)
+                    
+                    # Audio file group me bhej dena user ke naam ke caption ke sath
+                    with open(temp_mp3_path, "rb") as audio_file:
+                        await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=audio_file,
+                            title="⚠️ Rule Violation Alert",
+                            performer="Security Matrix Shield",
+                            caption=f"📢 Voice Alert for {username} • Listen immediately!"
+                        )
+                    
+                    # Kaam hone ke baad file delete karna taaki storage full na ho
+                    if os.path.exists(temp_mp3_path):
+                        os.remove(temp_mp3_path)
+                else:
+                    logger.error(f"Google TTS Engine returned status code: {response.status_code}")
+                    
+        except Exception as tts_err:
+            logger.error(f"Free Voice Warning System Failure: {tts_err}")
+
     else:
         # Strike 2: Hard Eviction execution block
         try:
@@ -784,6 +832,10 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             )
             await context.bot.send_message(chat_id, ban_content, parse_mode=ParseMode.HTML)
         except TelegramError: pass
+
+
+
+
 
 async def evaluate_via_groq(text: str) -> dict:
     if not groq_client: return {"violation": False, "action": "ignore"}
