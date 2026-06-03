@@ -752,70 +752,55 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
 
     # Atomic enforcement evaluation logic
     warnings = await db_layer.add_warning_atomic(chat_id, user_id)
-    
     if warnings == 1:
         await db_layer.log_action(chat_id, user_id, 0, "WARN", reason)
         
         # UI/UX Card Assembly for First Warning Violation
         card_content = (
-            f"⚠️ <b>| VIOLATION WARNING CARD |</b>\n"
+            f"⚠️ <b>| PHANTOM DELUXE SECURITY BREACH |</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚫 <b>User Profile:</b> {username}\n"
-            f"🛡️ <b>System Verdict:</b> FIRST WARN MATCH\n"
+            f"🚫 <b>Target Profile:</b> {username}\n"
+            f"🛡️ <b>System Verdict:</b> FIRST WARNING STRIKE\n"
             f"⚙️ <b>Breached Vector:</b> <code>{reason}</code>\n"
             f"📊 <b>Active Incident Threshold:</b> <code>{warnings}/2</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"❗ <i>Notice: Suspend activity immediately. Next strike issues an automated permanent ban structure.</i>"
+            f"❗ <i>Notice: Phantom Matrix is watching you. Next strike issues an automated permanent termination.</i>"
         )
-        # 1. Pehle normal text card warning jayegi
+        # 1. Pehle text card warning group me jayegi
         await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
 
-        # 2. --- 100% FREE GOOGLE DYNAMIC VOICE WARNING ---
+        # 2. --- PHANTOM DELUXE STYLE DYNAMIC MALE VOICE ---
         try:
-            # Username se '@' hata dete hain taaki Google AI "at the rate" na bole, seedha naam bole
+            import edge_tts
+            
             clean_name = username.replace("@", "")
             
-            # Jo bot bol kar sunayega (Hindi/Hinglish Text)
-            tts_text = f"Suno {clean_name}, tum group ke niyam tod rahe ho. Yeh tumhari pehli warning hai, agli baar seedha ban ho jaoge."
+            # Pure Phantom Deluxe Swag & Attitude Dialogue
+            tts_text = f"Halt! {clean_name}. Tum Phantom Deluxe Security Matrix ke radar par ho. Niyam todne ki galti dobara mat karna. Yeh tumhara pehla warning strike hai. Agli baar, seedha game over."
             
-            # Google Translate Free TTS API parameters
-            params = {
-                "ie": "UTF-8",
-                "tl": "hi",  # Clean Hindi Awaaz
-                "client": "tw-ob",
-                "q": tts_text
-            }
+            # MadhuramNeural deep male voice use karega
+            communicate = edge_tts.Communicate(tts_text, "hi-IN-MadhuramNeural")
+            temp_mp3_path = f"warn_{user_id}_{int(time.time())}.mp3"
             
-            # Bina kisi API key ke network request marna
-            async with httpx.AsyncClient() as client:
-                response = await client.get("https://translate.google.com/translate_tts", params=params, timeout=6.0)
-                
-                if response.status_code == 200:
-                    temp_mp3_path = f"warn_{user_id}_{int(time.time())}.mp3"
-                    
-                    # File ko temporary server par save karna
-                    with open(temp_mp3_path, "wb") as f:
-                        f.write(response.content)
-                    
-                    # Audio file group me bhej dena user ke naam ke caption ke sath
-                    with open(temp_mp3_path, "rb") as audio_file:
-                        await context.bot.send_audio(
-                            chat_id=chat_id,
-                            audio=audio_file,
-                            title="⚠️ Rule Violation Alert",
-                            performer="Security Matrix Shield",
-                            caption=f"📢 Voice Alert for {username} • Listen immediately!"
-                        )
-                    
-                    # Kaam hone ke baad file delete karna taaki storage full na ho
-                    if os.path.exists(temp_mp3_path):
-                        os.remove(temp_mp3_path)
-                else:
-                    logger.error(f"Google TTS Engine returned status code: {response.status_code}")
-                    
+            await communicate.save(temp_mp3_path)
+            
+            # Audio player ko bhi Phantom customized look diya hai
+            with open(temp_mp3_path, "rb") as audio_file:
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=audio_file,
+                    title="👁️ Phantom Deluxe Strike",
+                    performer="Phantom Network Core",
+                    caption=f"⚡ Phantom Warning Protocol deployed for {username}!"
+                )
+            
+            if os.path.exists(temp_mp3_path):
+                os.remove(temp_mp3_path)
+                        
         except Exception as tts_err:
-            logger.error(f"Free Voice Warning System Failure: {tts_err}")
-
+            logger.error(f"Phantom Voice Warning System Failure: {tts_err}")
+      
+            
     else:
         # Strike 2: Hard Eviction execution block
         try:
