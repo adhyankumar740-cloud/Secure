@@ -752,10 +752,11 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
 
     # Atomic enforcement evaluation logic
     warnings = await db_layer.add_warning_atomic(chat_id, user_id)
+    
     if warnings == 1:
         await db_layer.log_action(chat_id, user_id, 0, "WARN", reason)
         
-        # UI/UX Card Assembly for First Warning Violation
+        # UI/UX Card Assembly for First Warning Violation (Phantom Look)
         card_content = (
             f"⚠️ <b>| PHANTOM DELUXE SECURITY BREACH |</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -766,41 +767,77 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"❗ <i>Notice: Phantom Matrix is watching you. Next strike issues an automated permanent termination.</i>"
         )
-        # 1. Pehle text card warning group me jayegi
+        # 1. Normal text card warning message send karna
         await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
 
-        # 2. --- PHANTOM DELUXE STYLE DYNAMIC MALE VOICE ---
+        # 2. --- PHANTOM DYNAMIC VOICE WITH ULTRA FALLBACK MATRIX ---
         try:
-            import edge_tts
-            
+            # Name se '@' hatana aur XML special characters ko saaf karna taaki Microsoft block na kare
             clean_name = username.replace("@", "")
+            clean_name = re.sub(r'[<&>"\']', '', clean_name)
             
-            # Pure Phantom Deluxe Swag & Attitude Dialogue
+            # Phantom Deluxe Swag Script
             tts_text = f"Halt! {clean_name}. Tum Phantom Deluxe Security Matrix ke radar par ho. Niyam todne ki galti dobara mat karna. Yeh tumhara pehla warning strike hai. Agli baar, seedha game over."
             
-            # MadhuramNeural deep male voice use karega
-            communicate = edge_tts.Communicate(tts_text, "hi-IN-MadhuramNeural")
             temp_mp3_path = f"warn_{user_id}_{int(time.time())}.mp3"
+            audio_generated = False
             
-            await communicate.save(temp_mp3_path)
-            
-            # Audio player ko bhi Phantom customized look diya hai
-            with open(temp_mp3_path, "rb") as audio_file:
-                await context.bot.send_audio(
-                    chat_id=chat_id,
-                    audio=audio_file,
-                    title="👁️ Phantom Deluxe Strike",
-                    performer="Phantom Network Core",
-                    caption=f"⚡ Phantom Warning Protocol deployed for {username}!"
-                )
-            
-            if os.path.exists(temp_mp3_path):
-                os.remove(temp_mp3_path)
+            # TIER 1: Try Phantom Male Voice (Microsoft Edge TTS)
+            try:
+                import edge_tts
+                communicate = edge_tts.Communicate(tts_text, "hi-IN-MadhuramNeural")
+                await communicate.save(temp_mp3_path)
+                audio_generated = True
+                logger.info("⚡ Phantom Male Voice generated successfully via Edge-TTS.")
+            except Exception as e1:
+                logger.warning(f"Edge Male Voice blocked or failed: {e1}. Trying Edge Female Voice...")
+                
+                # TIER 2: Secondary Edge Voice Try
+                try:
+                    import edge_tts
+                    communicate = edge_tts.Communicate(tts_text, "hi-IN-SwaraNeural")
+                    await communicate.save(temp_mp3_path)
+                    audio_generated = True
+                    logger.info("⚡ Edge Female Voice generated as backup.")
+                except Exception as e2:
+                    logger.warning(f"Edge TTS completely blocked by Microsoft on this IP: {e2}. Switching to Google Core...")
+
+            # TIER 3: Absolute Bulletproof Fallback (Google TTS - Never Fails)
+            if not audio_generated:
+                params = {
+                    "ie": "UTF-8",
+                    "tl": "hi",
+                    "client": "tw-ob",
+                    "q": tts_text
+                }
+                async with httpx.AsyncClient() as client:
+                    response = await client.get("https://translate.google.com/translate_tts", params=params, timeout=6.0)
+                    if response.status_code == 200:
+                        with open(temp_mp3_path, "wb") as f:
+                            f.write(response.content)
+                        audio_generated = True
+                        logger.info("⚡ Audio successfully generated via Bulletproof Google Core.")
+                    else:
+                        logger.error(f"Google Core TTS also rejected request with status: {response.status_code}")
+
+            # Safe Audio dispatch system
+            if audio_generated and os.path.exists(temp_mp3_path):
+                with open(temp_mp3_path, "rb") as audio_file:
+                    await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_file,
+                        title="👁️ Phantom Deluxe Strike",
+                        performer="Phantom Network Core",
+                        caption=f"⚡ Phantom Warning Protocol deployed for {username}!"
+                    )
+                
+                # Memory cleanup layer
+                if os.path.exists(temp_mp3_path):
+                    os.remove(temp_mp3_path)
                         
         except Exception as tts_err:
-            logger.error(f"Phantom Voice Warning System Failure: {tts_err}")
-      
-            
+            logger.error(f"Phantom Voice Warning System Ultimate Failure: {tts_err}")
+
     else:
         # Strike 2: Hard Eviction execution block
         try:
@@ -817,6 +854,12 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             )
             await context.bot.send_message(chat_id, ban_content, parse_mode=ParseMode.HTML)
         except TelegramError: pass
+
+
+
+
+
+
 
 
 
