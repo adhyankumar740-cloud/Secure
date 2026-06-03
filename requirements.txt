@@ -5,3 +5,5 @@ openai
 groq
 better-profanity==0.7.0
 aiosqlite
+unidecode
+aiogram
