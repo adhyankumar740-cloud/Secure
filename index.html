@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Try-On Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+        }
+        .glass-card {
+            background: rgba(25, 30, 41, 0.65);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-gray-950 via-slate-900 to-zinc-950 text-gray-100 min-h-screen dynamic-scroll pb-12">
+
+    <header class="border-b border-gray-800/60 bg-gray-950/40 backdrop-blur-md sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="bg-gradient-to-tr from-amber-400 to-yellow-500 text-gray-950 p-2 rounded-xl shadow-lg shadow-yellow-500/10">
+                    <i class="fa-solid fa-shirt text-xl"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent">
+                        Virtual Try-On Studio
+                    </h1>
+                    <p class="text-xs text-amber-400 font-medium">Powered by Nano Banana 🍌</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="https://aistudio.google.com/" target="_blank" class="text-xs text-gray-400 hover:text-white transition flex items-center gap-1">
+                    Get API Key <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-8">
+        
+        <div class="glass-card rounded-2xl p-6 mb-8 shadow-xl">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div class="flex-1">
+                    <label for="api-key" class="block text-sm font-semibold text-gray-300 mb-1.5 flex items-center gap-2">
+                        <i class="fa-solid fa-key text-amber-400"></i> Gemini API Key
+                    </label>
+                    <input type="password" id="api-key" placeholder="AIzaSy..." 
+                           class="w-full bg-gray-900/80 border border-gray-700/60 rounded-xl px-4 py-2.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition">
+                </div>
+                <div class="w-full md:w-64">
+                    <label for="model-select" class="block text-sm font-semibold text-gray-300 mb-1.5 flex items-center gap-2">
+                        <i class="fa-solid fa-brain text-purple-400"></i> Engine Model
+                    </label>
+                    <select id="model-select" class="w-full bg-gray-900/80 border border-gray-700/60 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition">
+                        <option value="gemini-2.5-flash-image-preview">gemini-2.5-flash-image-preview (Requested)</option>
+                        <option value="gemini-2.5-flash-image" selected>gemini-2.5-flash-image (Stable Native)</option>
+                        <option value="gemini-3.1-flash-image">gemini-3.1-flash-image (Nano Banana 2)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <div class="lg:col-span-2 space-y-6">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                    
+                    <div class="glass-card rounded-2xl p-5 flex flex-col">
+                        <h3 class="text-sm font-semibold text-gray-200 mb-3 flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400"></span> 1. Your Base Photo (Identity & Pose)
+                        </h3>
+                        <div class="border-2 border-dashed border-gray-700 hover:border-amber-500/50 rounded-xl relative group transition flex-1 flex flex-col items-center justify-center p-4 min-h-[260px] bg-gray-900/30">
+                            <input type="file" id="person-upload" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleFileSelect('person-upload', 'person-preview', 'person-placeholder', 'person')">
+                            
+                            <div id="person-placeholder" class="text-center space-y-2 pointer-events-none">
+                                <i class="fa-solid fa-user-astronaut text-3xl text-gray-500 group-hover:text-amber-400 transition mb-1"></i>
+                                <p class="text-xs font-medium text-gray-300">Drag & drop or click to browse</p>
+                                <p class="text-[11px] text-gray-500">Keeps original posture, face, and dimensions</p>
+                            </div>
+                            
+                            <img id="person-preview" src="#" alt="User Preview" class="hidden max-h-[240px] w-full object-contain rounded-lg shadow-md">
+                        </div>
+                        <div id="resolution-info" class="text-[11px] text-gray-500 mt-2 text-right font-mono">No image loaded</div>
+                    </div>
+
+                    <div class="glass-card rounded-2xl p-5 flex flex-col">
+                        <h3 class="text-sm font-semibold text-gray-200 mb-3 flex items-center gap-2">
+                            <span class="w-2 h-2 rounded-full bg-blue-400"></span> 2. Clothing Textures / Item
+                        </h3>
+                        <div class="border-2 border-dashed border-gray-700 hover:border-amber-500/50 rounded-xl relative group transition flex-1 flex flex-col items-center justify-center p-4 min-h-[260px] bg-gray-900/30">
+                            <input type="file" id="clothing-upload" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer z-10" onchange="handleFileSelect('clothing-upload', 'clothing-preview', 'clothing-placeholder', 'clothing')">
+                            
+                            <div id="clothing-placeholder" class="text-center space-y-2 pointer-events-none">
+                                <i class="fa-solid fa-tags text-3xl text-gray-500 group-hover:text-amber-400 transition mb-1"></i>
+                                <p class="text-xs font-medium text-gray-300">Drag & drop or click to browse</p>
+                                <p class="text-[11px] text-gray-500">Provide clean clothing cutouts or models</p>
+                            </div>
+                            
+                            <img id="clothing-preview" src="#" alt="Clothing Preview" class="hidden max-h-[240px] w-full object-contain rounded-lg shadow-md">
+                        </div>
+                        <div class="h-4 mt-2"></div>
+                    </div>
+
+                </div>
+
+                <button id="generate-btn" onclick="generateTryOn()" class="w-full bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-gray-950 font-semibold py-3.5 px-6 rounded-xl shadow-lg shadow-amber-500/10 flex items-center justify-center gap-2 transition active:scale-[0.99]">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Render Try-On Simulation
+                </button>
+            </div>
+
+            <div class="lg:col-span-1">
+                <div class="glass-card rounded-2xl p-5 flex flex-col h-full min-h-[380px]">
+                    <h3 class="text-sm font-semibold text-gray-200 mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-wand-magic text-amber-400"></i> Generation Studio Result
+                    </h3>
+                    
+                    <div class="flex-1 border border-gray-800/80 bg-gray-950/60 rounded-xl flex flex-col items-center justify-center relative overflow-hidden p-3 min-h-[280px]">
+                        
+                        <div id="output-placeholder" class="text-center p-6 space-y-3 text-gray-500">
+                            <div class="w-16 h-16 bg-gray-900 rounded-full flex items-center justify-center mx-auto border border-gray-800">
+                                <i class="fa-solid fa-sparkles text-xl text-gray-600"></i>
+                            </div>
+                            <p class="text-xs">Your tailored output rendering will appear here.</p>
+                        </div>
+
+                        <div id="output-loading" class="hidden text-center space-y-4 z-20">
+                            <div class="relative w-16 h-16 mx-auto">
+                                <div class="absolute inset-0 rounded-full border-4 border-amber-500/20"></div>
+                                <div class="absolute inset-0 rounded-full border-4 border-t-amber-400 animate-spin"></div>
+                            </div>
+                            <div>
+                                <p class="text-sm font-medium text-gray-200">Executing Try-On Pipeline...</p>
+                                <p class="text-[11px] text-amber-400/80 mt-1">Preserving target body map structure</p>
+                            </div>
+                        </div>
+
+                        <div id="output-display" class="hidden w-full h-full flex items-center justify-center">
+                            <img id="result-image" src="" alt="Virtual Try-On Result" class="max-h-[340px] w-full object-contain rounded-lg border border-gray-800 shadow-2xl">
+                        </div>
+
+                    </div>
+
+                    <div id="action-buttons" class="hidden mt-4 grid grid-cols-2 gap-3">
+                        <button onclick="openModal()" class="w-full bg-gray-800 hover:bg-gray-700 text-gray-200 py-2.5 px-4 rounded-xl text-xs font-medium border border-gray-700/60 transition flex items-center justify-center gap-1.5">
+                            <i class="fa-solid fa-expand text-[11px]"></i> View Full Size
+                        </button>
+                        <button onclick="downloadImage()" class="w-full bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 py-2.5 px-4 rounded-xl text-xs font-bold border border-amber-500/30 transition flex items-center justify-center gap-1.5">
+                            <i class="fa-solid fa-download text-[11px]"></i> Download Asset
+                        </button>
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <div id="full-size-modal" class="fixed inset-0 bg-black/95 backdrop-blur-md z-50 hidden flex items-center justify-center p-4 transition-opacity duration-300 opacity-0">
+        <button onclick="closeModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white transition text-2xl bg-gray-900/80 border border-gray-800 w-11 h-11 rounded-full flex items-center justify-center shadow-lg focus:outline-none z-50">
+            <i class="fa-solid fa-xmark"></i>
+        </button>
+        <div class="relative max-w-full max-h-full flex items-center justify-center" onclick="event.stopPropagation()">
+            <img id="modal-image" src="" alt="Full Size Output Asset" class="max-w-[92vw] max-h-[92vh] object-contain rounded-xl shadow-2xl border border-gray-800/80">
+        </div>
+    </div>
+
+    <script>
+        let personBase64 = '';
+        let clothingBase64 = '';
+        let personMimeType = '';
+        let clothingMimeType = '';
+        let finalImageUrl = '';
+
+        let originalWidth = 0;
+        let originalHeight = 0;
+
+        const personImgObj = new Image();
+        personImgObj.onload = function() {
+            originalWidth = personImgObj.naturalWidth;
+            originalHeight = personImgObj.naturalHeight;
+            document.getElementById('resolution-info').innerText = `${originalWidth} × ${originalHeight} px`;
+        };
+
+        function handleFileSelect(inputId, previewId, placeholderId, contextType) {
+            const fileInput = document.getElementById(inputId);
+            const selectedFile = fileInput.files[0];
+            if (!selectedFile) return;
+
+            const fileReader = new FileReader();
+            fileReader.onload = function(e) {
+                const encodedData = e.target.result.split(',')[1];
+                const mimeType = selectedFile.type;
+
+                if (contextType === 'person') {
+                    personBase64 = encodedData;
+                    personMimeType = mimeType;
+                    personImgObj.src = e.target.result; // Triggers dimension parsing
+                } else {
+                    clothingBase64 = encodedData;
+                    clothingMimeType = mimeType;
+                }
+
+                const previewElement = document.getElementById(previewId);
+                previewElement.src = e.target.result;
+                previewElement.classList.remove('hidden');
+                document.getElementById(placeholderId).classList.add('hidden');
+            };
+            fileReader.readAsDataURL(selectedFile);
+        }
+
+        async function generateTryOn() {
+            const apiKey = document.getElementById('api-key').value.trim();
+            if (!apiKey) {
+                alert('Authentication required: Please enter a valid Gemini API Key configuration to route requests.');
+                return;
+            }
+
+            if (!personBase64 || !clothingBase64) {
+                alert('Missing inputs: Please upload both a target base photo and a clothing structural image.');
+                return;
+            }
+
+            toggleUILoadingState(true);
+
+            const chosenModel = document.getElementById('model-select').value;
+            const gatewayUrl = `https://generativelanguage.googleapis.com/v1beta/models/${chosenModel}:generateContent?key=${apiKey}`;
+
+            const conceptualPrompt = `
+                VIRTUAL TRY-ON STUDIO SPECIFICATION:
+                You are a deterministic, zero-shot fashion editing pipeline module. You are provided with two reference assets:
+                1. Target Person (Image 1) - Provides structural body template, head identity geometry, pose vector data, and scene lighting layout.
+                2. Target Garment (Image 2) - Provides clothing design elements, pattern distributions, fabrics, and configurations.
+
+                CRITICAL EXECUTION CONSTRAINTS:
+                - Do NOT alter or modify the person's face structure, skull geometry, facial expressions, hair styling, skin tones, or posture positioning. These elements must remain 100% pixel-faithful and identical to Image 1.
+                - Swap the current outfit from Image 1 out, seamlessly map and overlay the garment asset from Image 2 to align with the body shape contours and shadows of Image 1 naturally.
+                - The environment layout and backdrop elements from Image 1 must remain unaltered.
+            `;
+
+            const requestPayload = {
+                contents: [
+                    {
+                        parts: [
+                            { text: conceptualPrompt },
+                            { inlineData: { mimeType: personMimeType, data: personBase64 } },
+                            { inlineData: { mimeType: clothingMimeType, data: clothingBase64 } }
+                        ]
+                    }
+                ],
+                generationConfig: {
+                    responseModalities: ["IMAGE"]
+                }
+            };
+
+            try {
+                const networkResponse = await fetch(gatewayUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestPayload)
+                });
+
+                if (!networkResponse.ok) {
+                    const validationErr = await networkResponse.json();
+                    throw new Error(validationErr.error?.message || `HTTP Exception Gateway Code: ${networkResponse.status}`);
+                }
+
+                const responseData = await networkResponse.json();
+                let outputBase64Str = null;
+                let outputMimeType = 'image/png';
+
+                if (responseData.candidates && responseData.candidates[0]?.content?.parts) {
+                    for (const chunk of responseData.candidates[0].content.parts) {
+                        if (chunk.inlineData && chunk.inlineData.data) {
+                            outputBase64Str = chunk.inlineData.data;
+                            if (chunk.inlineData.mimeType) outputMimeType = chunk.inlineData.mimeType;
+                            break;
+                        }
+                    }
+                }
+
+                if (!outputBase64Str) {
+                    if (responseData.candidates && responseData.candidates[0]?.content?.parts?.[0]?.text) {
+                        throw new Error(`Execution policy conflict or fallback response text received: ${responseData.candidates[0].content.parts[0].text}`);
+                    }
+                    throw new Error('Null Image Content Exception: The AI engine completed processing but returned an empty structural image payload.');
+                }
+
+                await processCanvasStrictDimensions(`data:${outputMimeType};base64,${outputBase64Str}`);
+
+            } catch (runtimeException) {
+                console.error(runtimeException);
+                alert(`Pipeline Processing Failed: ${runtimeException.message}\n\nTechnical Tip: If using the preview model name fails, the stable framework model or your platform version might require standard model targeting. Try changing the Model parameter option in the setup block upper right.`);
+            } finally {
+                toggleUILoadingState(false);
+            }
+        }
+
+        async function processCanvasStrictDimensions(rawSrcData) {
+            return new Promise((resolve, reject) => {
+                const remoteImage = new Image();
+                remoteImage.onload = function() {
+                    // Create an internal processing canvas to rigidly assert exact sizing matches
+                    const processingCanvas = document.createElement('canvas');
+                    processingCanvas.width = originalWidth;
+                    processingCanvas.height = originalHeight;
+                    
+                    const renderingContext = processingCanvas.getContext('2d');
+                    
+                    // Fit generated frame exactly onto the dimensions mapping target input boundaries
+                    renderingContext.drawImage(remoteImage, 0, 0, originalWidth, originalHeight);
+
+                    // Re-export down to strict required format structures
+                    finalImageUrl = processingCanvas.toDataURL('image/png');
+
+                    document.getElementById('result-image').src = finalImageUrl;
+                    
+                    document.getElementById('output-placeholder').classList.add('hidden');
+                    document.getElementById('output-display').classList.remove('hidden');
+                    document.getElementById('action-buttons').classList.remove('hidden');
+                    resolve();
+                };
+                remoteImage.onerror = reject;
+                remoteImage.src = rawSrcData;
+            });
+        }
+
+        function toggleUILoadingState(isActiveState) {
+            const triggerBtn = document.getElementById('generate-btn');
+            const placeholderEl = document.getElementById('output-placeholder');
+            const loaderEl = document.getElementById('output-loading');
+            const displayEl = document.getElementById('output-display');
+            const navigationRow = document.getElementById('action-buttons');
+
+            if (isActiveState) {
+                triggerBtn.disabled = true;
+                triggerBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                placeholderEl.classList.add('hidden');
+                displayEl.classList.add('hidden');
+                navigationRow.classList.add('hidden');
+                loaderEl.classList.remove('hidden');
+            } else {
+                triggerBtn.disabled = false;
+                triggerBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                loaderEl.classList.add('hidden');
+            }
+        }
+
+        function openModal() {
+            if (!finalImageUrl) return;
+            const targetModal = document.getElementById('full-size-modal');
+            document.getElementById('modal-image').src = finalImageUrl;
+            targetModal.classList.remove('hidden');
+            setTimeout(() => { targetModal.classList.add('opacity-100'); }, 15);
+        }
+
+        function closeModal() {
+            const targetModal = document.getElementById('full-size-modal');
+            targetModal.classList.remove('opacity-100');
+            setTimeout(() => { targetModal.classList.add('hidden'); }, 300);
+        }
+
+        document.getElementById('full-size-modal').addEventListener('click', closeModal);
+    </script>
+</body>
+</html>
