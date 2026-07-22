@@ -35,6 +35,12 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from openai import AsyncOpenAI
 
+try:
+    from rapidfuzz import fuzz
+    RAPIDFUZZ_AVAILABLE = True
+except ImportError:
+    RAPIDFUZZ_AVAILABLE = False
+
 # ------------------------------------------------------------------
 # CONFIGURATION & ENVIRONMENT SETUP
 # ------------------------------------------------------------------
@@ -52,6 +58,9 @@ except ImportError:
     EDGE_TTS_AVAILABLE = False
     logger.warning("edge_tts not installed — voice warnings disabled")
 
+if not RAPIDFUZZ_AVAILABLE:
+    logger.warning("rapidfuzz not installed — fuzzy profanity matching disabled (pip install rapidfuzz)")
+
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
@@ -65,7 +74,10 @@ HF_API_KEY = os.getenv("HF_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", "8000"))
 
-# Optimized Compiled Regular Expressions & Advanced Expansion Matrices
+# ------------------------------------------------------------------
+# UPGRADED PROFANITY DETECTION ENGINE
+# ------------------------------------------------------------------
+# Layer A: existing compiled regex (kept from before — fast first pass)
 PROFANITY_REGEX = re.compile(
     r'(bh[e3]nchod|madar[c]hod|ch[u0]t[i1]ya|\bg[a@]nd\b|l[u0]nd|b[e3]h[e3]nchod|'
     r'r[a@]ndi|\bs[a@]l[a@]\b|k[a@]m[i1]n[a@]|f+u+c+k+|sh[i1]t+|b[i1]tch|'
@@ -73,16 +85,141 @@ PROFANITY_REGEX = re.compile(
     r'lodu|chodu|bsdk|\bmc\b|\bbc\b|\bmf\b)',
     re.IGNORECASE
 )
+
+# Layer B: root-word skeleton list — catches spaced-out / broken-up variants
+# ("m c", "m.c", "m a d a r c h o d") that the regex above can miss because
+# it expects the letters to be contiguous.
+ABUSE_ROOTS = [
+    "mc", "mdrchd", "bc", "bhnchd", "chutiya", "chtiya", "randi",
+    "harami", "haraami", "kutta", "kutti", "saala", "saali",
+    "gaand", "gand", "lund", "lauda", "loda", "chinaal", "raand",
+    "bhosdi", "bhosda", "bsdk", "gandu", "chodu", "chod", "mf",
+    "fuck", "bitch", "asshole", "bewkoof",
+]
+FUZZY_THRESHOLD = 82  # 0-100, higher = stricter
+
+_LEET_MAP = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s",
+    "7": "t", "8": "b", "@": "a", "$": "s",
+})
+
 SCAM_KEYWORDS = re.compile(r'(crypto_help|support_desk|air_drop|binance_support|trust_wallet|free_tokens|claim_airdrop|invest_money|double_funds)', re.IGNORECASE)
 BANNED_EXTENSIONS = {'.exe', '.apk', '.bat', '.scr', '.vbs', '.iso', '.dmg', '.msi', '.sh', '.cmd', '.pif'}
 TRUSTED_DOMAINS = {'youtube.com', 'youtu.be', 'wikipedia.org', 'github.com', 'google.com', 't.me'}
 
 def normalize_for_profanity(text: str) -> str:
-    """Remove spaces/symbols between letters for bypass detection"""
-    text = re.sub(r'\b(\w)\s+(?=\w\b)', r'\1', text)
-    text = re.sub(r'(\w)[.\-_*]{1,2}(?=\w)', r'\1', text)
-    text = text.replace('*', 'a').replace('@', 'a').replace('0', 'o').replace('1', 'i').replace('3', 'e')
+    """
+    Upgraded normalizer. Removes spaces/symbols between letters, converts
+    leetspeak, and collapses repeated letters, so bypass tricks like
+    "m . c", "m@d@rch0d", "gaaaali" all reduce to a clean matchable form.
+    """
+    text = text.lower()
+    text = text.translate(_LEET_MAP)
+    text = re.sub(r'[._\-*~`^]', '', text)
+    text = re.sub(r'(.)\1{2,}', r'\1', text)                  # collapse repeated letters
+    text = re.sub(r'\b(\w)\s+(?=\w\b)', r'\1', text)          # join single-letter-spaced words
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+def _strip_vowels(word: str) -> str:
+    return re.sub(r'[aeiou]', '', word)
+
+
+def rule_based_profanity_check(raw_text: str) -> bool:
+    """
+    Combines: (1) the original compiled regex, (2) root-skeleton matching,
+    (3) fuzzy matching, and (4) the large word/phrase database loaded from
+    disk (see load_bad_words_database below) — so contiguous slurs, spaced-out
+    variants, typos, AND thousands of known bad words/phrases all get caught
+    in one pass, without hand-maintaining a giant exact-spelling list.
+    """
+    if not raw_text:
+        return False
+
+    normalized = normalize_for_profanity(raw_text)
+
+    # (1) Original regex, run against raw + normalized text
+    if PROFANITY_REGEX.search(raw_text) or PROFANITY_REGEX.search(normalized):
+        return True
+
+    # (2) & (3) Root-skeleton + fuzzy matching
+    words = normalized.split()
+    candidates = words + [normalized]
+    for candidate in candidates:
+        skeleton = _strip_vowels(candidate)
+        for root in ABUSE_ROOTS:
+            root_skeleton = _strip_vowels(root)
+            if root in candidate or (root_skeleton and root_skeleton in skeleton):
+                return True
+            if RAPIDFUZZ_AVAILABLE and len(candidate) >= 3:
+                if fuzz.ratio(candidate, root) >= FUZZY_THRESHOLD:
+                    return True
+
+    # (4) Large bad-words/phrases database (word-boundary safe matching)
+    if _SINGLE_WORD_DB_REGEX and _SINGLE_WORD_DB_REGEX.search(normalized):
+        return True
+    if _PHRASE_DB_REGEX and _PHRASE_DB_REGEX.search(normalized):
+        return True
+
+    return False
+
+
+# ------------------------------------------------------------------
+# LARGE BAD-WORDS/PHRASES DATABASE (loaded from JSON on disk)
+# ------------------------------------------------------------------
+# Set BAD_WORDS_DB_PATH env var to switch between:
+#   data/bad_words_curated.json  (default, safer — generic/ambiguous English
+#                                  words like "sick", "toilet", "virgin",
+#                                  "welfare", "damn", "hell" etc. removed to
+#                                  avoid false-positives in normal chat)
+#   data/bad_words_full.json     (raw extracted list, maximum strictness,
+#                                  but WILL false-positive on common words)
+def load_bad_words_database(path: str):
+    """
+    Loads a JSON array of words/phrases, normalizes each entry the same way
+    incoming messages are normalized, and splits them into:
+      - single-word entries -> combined into one word-boundary regex
+      - multi-word phrases  -> combined into one boundary-safe regex
+    Word-boundary matching means "ass" won't match inside "class", etc.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        raw_entries = json.load(f)
+
+    single_words, phrases = set(), set()
+    for entry in raw_entries:
+        norm = normalize_for_profanity(entry)
+        if not norm:
+            continue
+        if " " in norm:
+            phrases.add(norm)
+        else:
+            single_words.add(norm)
+
+    single_regex = None
+    if single_words:
+        escaped = sorted((re.escape(w) for w in single_words), key=len, reverse=True)
+        single_regex = re.compile(r'\b(?:' + '|'.join(escaped) + r')\b', re.IGNORECASE)
+
+    phrase_regex = None
+    if phrases:
+        escaped = sorted((re.escape(p) for p in phrases), key=len, reverse=True)
+        phrase_regex = re.compile(r'\b(?:' + '|'.join(escaped) + r')\b', re.IGNORECASE)
+
+    return single_regex, phrase_regex, len(single_words), len(phrases)
+
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+BAD_WORDS_DB_PATH = os.getenv("BAD_WORDS_DB_PATH", os.path.join(_DATA_DIR, "bad_words_curated.json"))
+
+_SINGLE_WORD_DB_REGEX = None
+_PHRASE_DB_REGEX = None
+try:
+    _SINGLE_WORD_DB_REGEX, _PHRASE_DB_REGEX, _n_single, _n_phrase = load_bad_words_database(BAD_WORDS_DB_PATH)
+    logger.info(f"Loaded bad-words database from {BAD_WORDS_DB_PATH}: {_n_single} words, {_n_phrase} phrases.")
+except Exception as e:
+    logger.warning(f"Could not load bad-words database ({BAD_WORDS_DB_PATH}): {e} — continuing without it.")
+
 
 # --- ADVANCED GLOBAL ENGINE STATE & CACHES ---
 admin_cache = {}
@@ -422,7 +559,7 @@ def calculate_adaptive_threat_factor(chat_id: int) -> float:
     return 1.0
 
 # ------------------------------------------------------------------
-# CLOUD BACKENDS (HF TOXIC-BERT + MULTILINGUAL)
+# CLOUD BACKENDS (HF TOXIC-BERT + MULTILINGUAL + HINDI HATE-SPEECH)
 # ------------------------------------------------------------------
 async def check_tier2_2_hf_toxic_bert(text: str) -> bool:
     if not HF_API_KEY or not text.strip(): return False
@@ -461,6 +598,28 @@ async def check_hf_multilingual(text: str) -> bool:
         except Exception: pass
     return False
 
+async def check_hf_hindi_hate_speech(text: str) -> bool:
+    """New: dedicated Hindi/Hinglish hate-speech model — extra layer specifically
+    for desi profanity/abuse that the general-purpose models above may miss."""
+    if not HF_API_KEY or not text.strip(): return False
+    url = "https://api-inference.huggingface.co/models/Hate-speech-CNERG/dehatebert-mono-hindi"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json={"inputs": text[:512]}, headers=headers, timeout=4.0)
+            if response.status_code == 503:
+                await asyncio.sleep(2)
+                response = await client.post(url, json={"inputs": text[:512]}, headers=headers, timeout=4.0)
+            if response.status_code == 200:
+                data = response.json()
+                inner = data[0] if isinstance(data[0], list) else data
+                for pred in inner:
+                    label = str(pred.get('label', '')).upper()
+                    if label in ('HATE', 'OFFENSIVE', 'LABEL_1', '1') and pred.get('score', 0) > 0.72:
+                        return True
+        except Exception: pass
+    return False
+
 def can_delete_messages(member) -> bool:
     if isinstance(member, ChatMemberOwner): return True
     return bool(getattr(member, 'can_delete_messages', False))
@@ -472,7 +631,7 @@ async def start_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     start_text = (
         "👁️ <b>Maximum Security Matrix Active</b>\n\n"
         "I am a hardened firewall defense engine built to safeguard chats using deep unicode inspection, "
-        "adaptive rate throttling, and autonomous cloud AI modeling.\n\n"
+        "adaptive rate throttling, upgraded Hindi/Hinglish profanity detection, and autonomous cloud AI modeling.\n\n"
         "🔧 <b>Available Administrative Directives:</b>\n"
         "• /analytics - Review active threat parameters\n"
         "• /add_white &lt;user_id&gt; - Exception allocation for bots/users\n"
@@ -573,8 +732,8 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if entropy > 5.2 and len(cleaned_text) > 20 and len(raw_payload_text) < 350 and trust_score < 50.0:
          return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"High Entropy Randomized Bypass Match", username)
 
-    normalized_for_check = normalize_for_profanity(cleaned_text)
-    if PROFANITY_REGEX.search(cleaned_text) or PROFANITY_REGEX.search(raw_payload_text) or PROFANITY_REGEX.search(normalized_for_check):
+    # --- UPGRADED PROFANITY CHECK (regex + root-skeleton + fuzzy, all in one call) ---
+    if rule_based_profanity_check(cleaned_text) or rule_based_profanity_check(raw_payload_text):
         await db_layer.update_user_reputation(chat.id, user.id, -10.0)
         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Profanity / Group Policy Abuse Violation", username)
         
@@ -614,13 +773,21 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if len(raw_payload_text.strip()) < 3: return
         
         if HF_API_KEY:
-            hf_results = await asyncio.gather(check_tier2_2_hf_toxic_bert(raw_payload_text), check_hf_multilingual(raw_payload_text), return_exceptions=True)
+            hf_results = await asyncio.gather(
+                check_tier2_2_hf_toxic_bert(raw_payload_text),
+                check_hf_multilingual(raw_payload_text),
+                check_hf_hindi_hate_speech(raw_payload_text),
+                return_exceptions=True
+            )
             if hf_results[0] is True:
                 await db_layer.update_user_reputation(chat.id, user.id, -15.0)
                 return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Pattern Toxicity Guard Violation (HF)", username)
             if hf_results[1] is True:
                 await db_layer.update_user_reputation(chat.id, user.id, -20.0)
                 return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Multilingual Hate Speech Guard Violation (HF)", username)
+            if hf_results[2] is True:
+                await db_layer.update_user_reputation(chat.id, user.id, -15.0)
+                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Hindi/Hinglish Hate Speech Guard Violation (HF)", username)
 
         # MAIN TASK MODERATION -> Uses groq_client (API Key 1)
         if groq_client and len(raw_payload_text.strip()) > 8:
