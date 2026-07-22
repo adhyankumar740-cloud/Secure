@@ -265,6 +265,7 @@ class HybridDatabaseLayer:
             await db.execute('''CREATE TABLE IF NOT EXISTS user_reputation (chat_id INTEGER, user_id INTEGER, reputation_score REAL DEFAULT 100.0, total_messages INTEGER DEFAULT 0, risk_factor TEXT DEFAULT 'LOW', last_seen INTEGER, PRIMARY KEY(chat_id, user_id))''')
             await db.execute('''CREATE TABLE IF NOT EXISTS invite_chains (chat_id INTEGER, user_id INTEGER, inviter_id INTEGER, invite_link_used TEXT, join_timestamp INTEGER, PRIMARY KEY(chat_id, user_id))''')
             await db.execute('''CREATE TABLE IF NOT EXISTS persistent_media_hashes (chat_id INTEGER, file_hash TEXT, incident_count INTEGER DEFAULT 1, payload_type TEXT, last_seen INTEGER, PRIMARY KEY(chat_id, file_hash))''')
+            await db.execute('''CREATE TABLE IF NOT EXISTS temp_mutes (chat_id INTEGER, user_id INTEGER, expires_at INTEGER, mute_level INTEGER, PRIMARY KEY(chat_id, user_id))''')
             await db.commit()
             
         logger.info("⚡ SQLite Front-line RAM caching engine synchronized.")
@@ -382,6 +383,28 @@ class HybridDatabaseLayer:
             else:
                 await db.execute('''INSERT INTO captcha_registry (chat_id, user_id, message_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(chat_id, user_id) DO UPDATE SET message_id=excluded.message_id, expires_at=excluded.expires_at''', (chat_id, user_id, message_id, expires_at))
             await db.commit()
+
+    async def persist_temp_mute(self, chat_id: int, user_id: int, expires_at: int, mute_level: int, remove: bool = False):
+        """Restart-safe scheduled mute. expires_at is an absolute unix timestamp,
+        so even if the bot process restarts (Render redeploy/crash), the
+        recovery routine on startup reads this from disk and knows exactly
+        when to unmute — it never relies on an in-memory asyncio.sleep alone."""
+        async with aiosqlite.connect(self.db_path) as db:
+            if remove:
+                await db.execute("DELETE FROM temp_mutes WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+            else:
+                await db.execute('''INSERT INTO temp_mutes (chat_id, user_id, expires_at, mute_level) VALUES (?, ?, ?, ?) ON CONFLICT(chat_id, user_id) DO UPDATE SET expires_at=excluded.expires_at, mute_level=excluded.mute_level''', (chat_id, user_id, expires_at, mute_level))
+            await db.commit()
+
+    async def get_temp_mute(self, chat_id: int, user_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT expires_at, mute_level FROM temp_mutes WHERE chat_id=? AND user_id=?", (chat_id, user_id)) as cursor:
+                return await cursor.fetchone()
+
+    async def get_all_temp_mutes(self) -> list:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT chat_id, user_id, expires_at, mute_level FROM temp_mutes") as cursor:
+                return await cursor.fetchall()
 
     async def add_warning_atomic(self, chat_id: int, user_id: int) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -688,13 +711,15 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except TelegramError: pass
         return
 
-    # Whitelist & Admin bypass
-    if await is_chat_admin(context.bot, chat.id, user.id):
-        logger.info(f"⏭️ Bypassed (admin) | chat={chat.id} user={user.id}")
-        return
+    # Whitelist fully bypasses. Admins do NOT fully bypass anymore — their
+    # violating messages still get deleted, they just never get warned/muted/banned.
     if await db_layer.is_whitelisted(chat.id, user.id):
         logger.info(f"⏭️ Bypassed (whitelisted) | chat={chat.id} user={user.id}")
         return
+
+    is_admin_user = await is_chat_admin(context.bot, chat.id, user.id)
+    if is_admin_user:
+        logger.info(f"👮 Admin user detected — violations will be delete-only, no warn/mute/ban | chat={chat.id} user={user.id}")
 
     raw_payload_text = msg.text or msg.caption or ""
     filename = msg.document.file_name if msg.document else ""
@@ -721,40 +746,40 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
         media_type = "photo" if msg.photo else "video" if msg.video else "document"
         incident_count = await db_layer.check_duplicate_media_hash(chat.id, media_unique_id, media_type)
         if incident_count > 3 and trust_score < 75.0:
-            await db_layer.update_user_reputation(chat.id, user.id, -20.0)
-            return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Coordinated Mass Media Duplicate Campaign Trigger", username, immediate_ban=True)
+            if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -20.0)
+            return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Coordinated Mass Media Duplicate Campaign Trigger", username, immediate_ban=True, admin_delete_only=is_admin_user)
 
     if filename:
         file_alert, is_malicious = InfrastructureInspector.inspect_file_structure(filename)
         if is_malicious:
-            await db_layer.update_user_reputation(chat.id, user.id, -40.0)
-            return await execute_local_punishment(context, chat.id, user.id, msg.message_id, file_alert, username, immediate_ban=True)
+            if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -40.0)
+            return await execute_local_punishment(context, chat.id, user.id, msg.message_id, file_alert, username, immediate_ban=True, admin_delete_only=is_admin_user)
 
     cleaned_text, entropy, mixed_scripts = UnicodeObfuscationEngine.deep_clean_and_normalize(raw_payload_text)
     
     if mixed_scripts >= 2 and len(raw_payload_text) < 350 and trust_score < 60.0:
-         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"Homoglyph Obfuscation Payload ({mixed_scripts} scripts mixed)", username)
+         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"Homoglyph Obfuscation Payload ({mixed_scripts} scripts mixed)", username, admin_delete_only=is_admin_user)
     if entropy > 5.2 and len(cleaned_text) > 20 and len(raw_payload_text) < 350 and trust_score < 50.0:
-         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"High Entropy Randomized Bypass Match", username)
+         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, f"High Entropy Randomized Bypass Match", username, admin_delete_only=is_admin_user)
 
     # --- UPGRADED PROFANITY CHECK (regex + root-skeleton + fuzzy, all in one call) ---
     if rule_based_profanity_check(cleaned_text) or rule_based_profanity_check(raw_payload_text):
         logger.info(f"🚨 Profanity matched | chat={chat.id} user={user.id} text='{raw_payload_text[:80]}'")
-        await db_layer.update_user_reputation(chat.id, user.id, -10.0)
-        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Profanity / Group Policy Abuse Violation", username)
+        if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -10.0)
+        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Profanity / Group Policy Abuse Violation", username, admin_delete_only=is_admin_user)
         
     if SCAM_KEYWORDS.search(cleaned_text) or SCAM_KEYWORDS.search(raw_payload_text):
-        await db_layer.update_user_reputation(chat.id, user.id, -35.0)
-        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Deceptive Phishing Payload Vector", username, immediate_ban=True)
+        if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -35.0)
+        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Deceptive Phishing Payload Vector", username, immediate_ban=True, admin_delete_only=is_admin_user)
 
     url_alert, url_flagged = await InfrastructureInspector.resolve_and_profile_url(raw_payload_text)
     if url_flagged:
-        await db_layer.update_user_reputation(chat.id, user.id, -15.0)
-        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, url_alert, username)
+        if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -15.0)
+        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, url_alert, username, admin_delete_only=is_admin_user)
 
     is_bot_pattern = BehavioralProfiler.analyze_structural_velocity(chat.id, user.id, raw_payload_text)
     if is_bot_pattern and trust_score < 65.0:
-        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Behavioral Fingerprint Machine Burst Detection", username, immediate_ban=True)
+        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Behavioral Fingerprint Machine Burst Detection", username, immediate_ban=True, admin_delete_only=is_admin_user)
 
     now = time.time()
     flood_cache[chat.id][user.id].append(now)
@@ -769,7 +794,7 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
     if len([t for t in flood_cache[chat.id][user.id] if now - t < 4.0]) >= 5:
-        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Text Burst Rapid Velocity Trigger", username, immediate_ban=True)
+        return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Text Burst Rapid Velocity Trigger", username, immediate_ban=True, admin_delete_only=is_admin_user)
 
     has_bypass_symbols = bool(re.search(r'[^a-zA-Z0-9\s\u0900-\u097F]', raw_payload_text))
     has_scam_context = any(w in cleaned_text for w in ["crypto", "earn", "join", "channel", "airdrop", "free", "gift", "money", "invest"])
@@ -786,14 +811,14 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return_exceptions=True
             )
             if hf_results[0] is True:
-                await db_layer.update_user_reputation(chat.id, user.id, -15.0)
-                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Pattern Toxicity Guard Violation (HF)", username)
+                if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -15.0)
+                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Pattern Toxicity Guard Violation (HF)", username, admin_delete_only=is_admin_user)
             if hf_results[1] is True:
-                await db_layer.update_user_reputation(chat.id, user.id, -20.0)
-                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Multilingual Hate Speech Guard Violation (HF)", username)
+                if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -20.0)
+                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Multilingual Hate Speech Guard Violation (HF)", username, admin_delete_only=is_admin_user)
             if hf_results[2] is True:
-                await db_layer.update_user_reputation(chat.id, user.id, -15.0)
-                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Hindi/Hinglish Hate Speech Guard Violation (HF)", username)
+                if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -15.0)
+                return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Hindi/Hinglish Hate Speech Guard Violation (HF)", username, admin_delete_only=is_admin_user)
 
         # MAIN TASK MODERATION -> Uses groq_client (API Key 1)
         if groq_client and len(raw_payload_text.strip()) > 8:
@@ -801,19 +826,28 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if ai_res.get("violation") and ai_res.get("confidence", 0) >= 80:
                 action = ai_res.get("action", "ban")
                 reason = f"Autonomous AI Defense Framework Flagged: {ai_res.get('reason')}"
-                await db_layer.update_user_reputation(chat.id, user.id, -50.0)
+                if not is_admin_user: await db_layer.update_user_reputation(chat.id, user.id, -50.0)
                 try: await context.bot.delete_message(chat.id, msg.message_id)
-                except TelegramError: pass
-                
-                if action == "ban":
-                    await context.bot.ban_chat_member(chat.id, user_id=user.id)
-                    await db_layer.log_action(chat.id, user.id, 0, "AI_AUTONOMOUS_BAN", reason)
-                    await context.bot.send_message(chat.id, f"🛑 <b>Autonomous AI Defense Network Ban</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
+                except TelegramError as e: logger.error(f"❌ delete_message (AI flow) failed: {e}")
+
+                if is_admin_user:
+                    logger.info(f"👮 Admin message deleted by AI defense flow (no punishment) | chat={chat.id} user={user.id} reason='{reason}'")
+                    await db_layer.log_action(chat.id, user.id, 0, "ADMIN_MSG_DELETED", reason)
+                elif action == "ban":
+                    try:
+                        await context.bot.ban_chat_member(chat.id, user_id=user.id)
+                        await db_layer.log_action(chat.id, user.id, 0, "AI_AUTONOMOUS_BAN", reason)
+                        await context.bot.send_message(chat.id, f"🛑 <b>Autonomous AI Defense Network Ban</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
+                    except TelegramError as e:
+                        logger.error(f"❌ ban_chat_member (AI flow) failed (chat={chat.id}, user={user.id}): {e}")
                 elif action == "mute":
-                    until = int(time.time()) + 7200
-                    await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
-                    await db_layer.log_action(chat.id, user.id, 0, "AI_AUTONOMOUS_MUTE", reason)
-                    await context.bot.send_message(chat.id, f"🔇 <b>Autonomous AI Defense Network Mute (2 Hours)</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
+                    try:
+                        until = int(time.time()) + 7200
+                        await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+                        await db_layer.log_action(chat.id, user.id, 0, "AI_AUTONOMOUS_MUTE", reason)
+                        await context.bot.send_message(chat.id, f"🔇 <b>Autonomous AI Defense Network Mute (2 Hours)</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
+                    except TelegramError as e:
+                        logger.error(f"❌ restrict_chat_member (AI flow) failed (chat={chat.id}, user={user.id}): {e}")
 
 # ------------------------------------------------------------------
 # SYSTEM GATEKEEPERS
@@ -943,6 +977,23 @@ async def execute_direct_unban_eviction(bot: telegram.Bot, chat_id: int, user_id
     await db_layer.persist_captcha(chat_id, user_id, message_id, 0, remove=True)
     captcha_registry[chat_id].pop(user_id, None)
 
+async def lift_temp_mute(bot: telegram.Bot, chat_id: int, user_id: int):
+    try:
+        full_perms = ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_other_messages=True, can_add_web_page_previews=True)
+        await bot.restrict_chat_member(chat_id, user_id, permissions=full_perms)
+        logger.info(f"🔊 Auto-unmuted user {user_id} in chat {chat_id} (scheduled mute expired)")
+    except TelegramError as e:
+        logger.error(f"❌ Auto-unmute FAILED (chat={chat_id}, user={user_id}): {e}")
+    await db_layer.persist_temp_mute(chat_id, user_id, 0, 0, remove=True)
+
+async def temp_mute_expiry_timer(bot: telegram.Bot, chat_id: int, user_id: int, wait_duration: float):
+    await asyncio.sleep(max(wait_duration, 0))
+    # Re-check DB — if this row is gone (e.g. user got banned in the meantime,
+    # or a newer mute superseded it) skip the auto-unmute.
+    row = await db_layer.get_temp_mute(chat_id, user_id)
+    if row:
+        await lift_temp_mute(bot, chat_id, user_id)
+
 async def verify_timeout_reaper(bot: telegram.Bot, chat_id: int, user_id: int, target_msg_id: int, wait_duration: float):
     await asyncio.sleep(wait_duration)
     async with aiosqlite.connect(db_layer.db_path) as db:
@@ -980,6 +1031,16 @@ async def execute_recovery_synchronization(app: Application):
             captcha_registry[chat_id][user_id] = message_id
             asyncio.create_task(verify_timeout_reaper(app.bot, chat_id, user_id, message_id, float(expires_at - now)))
 
+    temp_mutes = await db_layer.get_all_temp_mutes()
+    for chat_id, user_id, expires_at, mute_level in temp_mutes:
+        if expires_at <= now:
+            logger.info(f"🔊 Recovered expired mute on startup — unmuting user {user_id} in chat {chat_id} immediately")
+            asyncio.create_task(lift_temp_mute(app.bot, chat_id, user_id))
+        else:
+            remaining = float(expires_at - now)
+            logger.info(f"⏰ Recovered scheduled mute — user {user_id} in chat {chat_id} will auto-unmute in {int(remaining)}s")
+            asyncio.create_task(temp_mute_expiry_timer(app.bot, chat_id, user_id, remaining))
+
 async def memory_janitor():
     while True:
         await asyncio.sleep(120)
@@ -997,8 +1058,8 @@ async def memory_janitor():
                 if not behavioral_velocity_cache[cid]: del behavioral_velocity_cache[cid]
         except Exception: pass
 
-async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, msg_id: int, reason: str, username: str, immediate_ban: bool = False):
-    logger.info(f"⚔️ PUNISHMENT TRIGGERED | chat={chat_id} user={user_id} reason='{reason}' immediate_ban={immediate_ban}")
+async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, msg_id: int, reason: str, username: str, immediate_ban: bool = False, admin_delete_only: bool = False):
+    logger.info(f"⚔️ PUNISHMENT TRIGGERED | chat={chat_id} user={user_id} reason='{reason}' immediate_ban={immediate_ban} admin_delete_only={admin_delete_only}")
 
     # --- Delete is now BEST-EFFORT only. A failed/blocked delete must NEVER
     # stop the warn/mute/ban flow below — that was the bug causing the bot
@@ -1013,10 +1074,10 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                 f"(status={getattr(bot_member, 'status', '?')}, "
                 f"can_delete_messages={getattr(bot_member, 'can_delete_messages', None)}, "
                 f"can_restrict_members={getattr(bot_member, 'can_restrict_members', None)}). "
-                f"Continuing with warn/ban anyway."
+                f"Continuing anyway."
             )
     except TelegramError as e:
-        logger.error(f"❌ get_chat_member failed for bot in chat {chat_id}: {e}. Continuing with warn/ban anyway.")
+        logger.error(f"❌ get_chat_member failed for bot in chat {chat_id}: {e}. Continuing anyway.")
 
     if can_delete:
         try:
@@ -1024,6 +1085,17 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             logger.info(f"🗑️ Deleted message {msg_id} in chat {chat_id}")
         except TelegramError as e:
             logger.error(f"❌ delete_message failed (chat={chat_id}, msg={msg_id}): {e}")
+
+    # --- ADMIN SAFEGUARD: for group admins/owners, ONLY delete the message.
+    # Never warn, mute, or ban an admin — that's the whole point of them
+    # being an admin. This also stops accidental self-bans while testing. ---
+    if admin_delete_only:
+        try:
+            await db_layer.log_action(chat_id, user_id, 0, "ADMIN_MSG_DELETED", reason)
+        except Exception:
+            pass
+        logger.info(f"👮 Admin message deleted (no punishment applied) | chat={chat_id} user={user_id} reason='{reason}'")
+        return
 
     if immediate_ban:
         try:
@@ -1040,28 +1112,35 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
         return
 
     warnings = await db_layer.add_warning_atomic(chat_id, user_id)
-    if warnings == 1:
+
+    # --- ESCALATION LADDER ---
+    # Strike 1-2: warning only
+    # Strike 3:   mute 4 hours  (restart-safe, absolute timestamp in DB)
+    # Strike 4:   mute 8 hours  (restart-safe, absolute timestamp in DB)
+    # Strike 5+:  permanent ban
+    if warnings <= 2:
         await db_layer.log_action(chat_id, user_id, 0, "WARN", reason)
+        strike_label = "FIRST WARNING STRIKE" if warnings == 1 else "SECOND WARNING STRIKE"
         card_content = (
             f"⚠️ <b>| PHANTOM DELUXE SECURITY BREACH |</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🚫 <b>Target Profile:</b> {username}\n"
-            f"🛡️ <b>System Verdict:</b> FIRST WARNING STRIKE\n"
+            f"🛡️ <b>System Verdict:</b> {strike_label}\n"
             f"⚙️ <b>Breached Vector:</b> <code>{reason}</code>\n"
-            f"📊 <b>Active Incident Threshold:</b> <code>{warnings}/2</code>\n"
+            f"📊 <b>Active Incident Threshold:</b> <code>{warnings}/5</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"❗ <i>Notice: Phantom Matrix is watching you. Next strike issues an automated permanent termination.</i>"
+            f"❗ <i>Notice: Phantom Matrix is watching you. Strike 3 triggers a 4-hour mute.</i>"
         )
         try:
             await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
-            logger.info(f"⚠️ Sent WARN card for user {user_id} in chat {chat_id} (warning {warnings}/2)")
+            logger.info(f"⚠️ Sent WARN card for user {user_id} in chat {chat_id} (warning {warnings}/5)")
         except TelegramError as e:
             logger.error(f"❌ Failed to send WARN card (chat={chat_id}, user={user_id}): {e}")
 
-        if EDGE_TTS_AVAILABLE:
+        if EDGE_TTS_AVAILABLE and warnings == 1:
             try:
                 clean_name = re.sub(r'[<&>"\']', '', username.replace("@", "")) or "User"
-                tts_text = f"Halt, {clean_name}! You are now on the radar of the Phantom Deluxe Security Matrix. Do not violate the group protocols again. This is your first warning strike. Next time, it is an immediate permanent termination. Game over."
+                tts_text = f"Halt, {clean_name}! You are now on the radar of the Phantom Deluxe Security Matrix. Do not violate the group protocols again. Three more strikes and you get muted for four hours."
                 temp_mp3_path = f"warn_{user_id}_{int(time.time())}.mp3"
                 audio_generated = False
                 try:
@@ -1080,17 +1159,49 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
                         await context.bot.send_audio(chat_id=chat_id, audio=audio_file, title="👁️ Phantom Deluxe Strike", performer="Phantom Network Core", caption=f"⚡ Phantom Warning Protocol deployed for {username}!")
                     if os.path.exists(temp_mp3_path): os.remove(temp_mp3_path)
             except Exception: pass
-    else:
+
+    elif warnings in (3, 4):
+        mute_hours = 4 if warnings == 3 else 8
+        mute_level = 1 if warnings == 3 else 2
+        until_ts = int(time.time()) + mute_hours * 3600
+        try:
+            await context.bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until_ts)
+            await db_layer.log_action(chat_id, user_id, 0, f"MUTE_{mute_hours}H", reason)
+            # Persist absolute expiry to DB so a Render restart during the
+            # mute window doesn't leave the user stuck muted forever.
+            await db_layer.persist_temp_mute(chat_id, user_id, until_ts, mute_level)
+            asyncio.create_task(temp_mute_expiry_timer(context.bot, chat_id, user_id, mute_hours * 3600))
+            mute_content = (
+                f"🔇 <b>| PHANTOM DELUXE TIMEOUT ESCALATION |</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🚫 <b>Target Profile:</b> {username}\n"
+                f"🛡️ <b>System Verdict:</b> MUTED FOR {mute_hours} HOURS\n"
+                f"⚙️ <b>Breached Vector:</b> <code>{reason}</code>\n"
+                f"📊 <b>Active Incident Threshold:</b> <code>{warnings}/5</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"❗ <i>Notice: One more violation after this results in a permanent ban.</i>" if warnings == 4 else
+                f"❗ <i>Notice: Next violation after this mute escalates to an 8-hour mute.</i>"
+            )
+            await context.bot.send_message(chat_id, mute_content, parse_mode=ParseMode.HTML)
+            logger.info(f"🔇 Muted user {user_id} in chat {chat_id} for {mute_hours}h (auto-unmute at unix {until_ts})")
+        except TelegramError as e:
+            logger.error(
+                f"❌ restrict_chat_member ({mute_hours}h mute) FAILED (chat={chat_id}, user={user_id}): {e}. "
+                f"Bot ko group me 'Restrict members' permission chahiye — group settings me bot ka admin role kholke check kar."
+            )
+
+    else:  # warnings >= 5
         try:
             await context.bot.ban_chat_member(chat_id, user_id)
             await db_layer.log_action(chat_id, user_id, 0, "BAN", reason)
             await db_layer.reset_warnings_atomic(chat_id, user_id)
-            ban_content = f"🛑 <b>| PERMANENT RADICAL BAN ESCALATION |</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 <b>Evicted User:</b> {username}\n❌ <b>Reason:</b> {reason} (Warning Limits Exhausted)\n📉 <b>Status:</b> Terminated from Channel Node."
+            await db_layer.persist_temp_mute(chat_id, user_id, 0, 0, remove=True)  # cleanup any lingering mute schedule
+            ban_content = f"🛑 <b>| PERMANENT RADICAL BAN ESCALATION |</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 <b>Evicted User:</b> {username}\n❌ <b>Reason:</b> {reason} (Warning Limits Exhausted — 2 warnings + 2 timeouts)\n📉 <b>Status:</b> Terminated from Channel Node."
             await context.bot.send_message(chat_id, ban_content, parse_mode=ParseMode.HTML)
-            logger.info(f"🛑 Banned user {user_id} in chat {chat_id} after warning limit exhausted")
+            logger.info(f"🛑 Banned user {user_id} in chat {chat_id} after full escalation ladder exhausted")
         except TelegramError as e:
             logger.error(
-                f"❌ ban_chat_member FAILED on 2nd warning (chat={chat_id}, user={user_id}): {e}. "
+                f"❌ ban_chat_member FAILED on final escalation step (chat={chat_id}, user={user_id}): {e}. "
                 f"Bot ko group me 'Ban users' permission chahiye."
             )
 
@@ -1103,14 +1214,25 @@ async def evaluate_via_groq(text: str) -> dict:
     except Exception: return {"violation": False, "action": "ignore"}
 
 async def is_chat_admin(bot, chat_id: int, user_id: int) -> bool:
-    if user_id == OWNER_ID: return True
-    if chat_id in admin_cache and (time.time() - admin_cache[chat_id]['time']) < 1800: return user_id in admin_cache[chat_id]['list']
+    if user_id == OWNER_ID:
+        logger.warning(f"🔑 User {user_id} matched OWNER_ID ({OWNER_ID}) — treated as admin. If this is wrong, fix the OWNER_ID env var on Render.")
+        return True
+    if chat_id in admin_cache and (time.time() - admin_cache[chat_id]['time']) < 1800:
+        cached = user_id in admin_cache[chat_id]['list']
+        if cached:
+            logger.warning(f"🔑 User {user_id} matched CACHED admin list for chat {chat_id}: {admin_cache[chat_id]['list']} (cached {int(time.time()-admin_cache[chat_id]['time'])}s ago)")
+        return cached
     try:
         admins = await bot.get_chat_administrators(chat_id)
         alist = [a.user.id for a in admins]
         admin_cache[chat_id] = {'list': alist, 'time': time.time()}
-        return user_id in alist
-    except TelegramError: return False
+        is_admin = user_id in alist
+        if is_admin:
+            logger.warning(f"🔑 User {user_id} found in FRESH admin list for chat {chat_id}: {alist}")
+        return is_admin
+    except TelegramError as e:
+        logger.error(f"❌ get_chat_administrators failed for chat {chat_id}: {e}")
+        return False
 
 async def post_startup_validation(app: Application):
     await db_layer.init_db()
