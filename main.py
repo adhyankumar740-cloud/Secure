@@ -875,35 +875,8 @@ async def gatekeeper_join_handler(update: Update, context: ContextTypes.DEFAULT_
             except TelegramError: pass
         return
 
-    for human in new_humans:
-        if await db_layer.is_whitelisted(chat.id, human.id): continue
-        try:
-            await context.bot.restrict_chat_member(chat.id, human.id, permissions=ChatPermissions(can_send_messages=False))
-            kb = [[InlineKeyboardButton("🔒 Pass Identity Gate", callback_data=f"gate_{human.id}")]]
-            out = await context.bot.send_message(chat.id, f"🛡️ <b>Security Verification Protocol Required.</b>\n<b>User:</b> {human.first_name}\nComplete registration challenge within 60s.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
-            await db_layer.persist_captcha(chat.id, human.id, out.message_id, int(time.time()) + 60)
-            captcha_registry[chat.id][human.id] = out.message_id
-            asyncio.create_task(verify_timeout_reaper(context.bot, chat.id, human.id, out.message_id, 60.0))
-        except TelegramError: pass
-
-async def process_gate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
-    try: target_id = int(query.data.split("_")[1])
-    except Exception: return
-    if user_id != target_id: return await query.answer("❌ Verification access denied.", show_alert=True)
-    if chat_id in captcha_registry and user_id in captcha_registry[chat_id]:
-        try:
-            full_perms = ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_other_messages=True, can_add_web_page_previews=True)
-            await context.bot.restrict_chat_member(chat_id, user_id, permissions=full_perms)
-            await context.bot.delete_message(chat_id, query.message.message_id)
-            await query.answer("Verification Challenge Cleared. Identity Authenticated.", show_alert=True)
-            await db_layer.update_user_reputation(chat_id, user_id, 5.0)
-        except TelegramError: pass
-        finally:
-            await db_layer.persist_captcha(chat_id, user_id, query.message.message_id, 0, remove=True)
-            captcha_registry[chat_id].pop(user_id, None)
+    # Captcha/verification-button gate removed — new members can chat immediately.
+    # Only mass-join raid protection above still applies.
 
 async def analytics_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat, user = update.effective_chat, update.effective_user
@@ -1257,7 +1230,6 @@ def main():
     app.add_handler(CommandHandler("remove_white", remove_white_command))
     app.add_handler(CommandHandler("whitelist", whitelist_command_handler))
     
-    app.add_handler(CallbackQueryHandler(process_gate_callback, pattern=r"^gate_"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, gatekeeper_join_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE | filters.AUDIO, ingestion_pipeline))
     
