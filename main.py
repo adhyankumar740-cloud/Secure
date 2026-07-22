@@ -689,7 +689,12 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     # Whitelist & Admin bypass
-    if await is_chat_admin(context.bot, chat.id, user.id) or await db_layer.is_whitelisted(chat.id, user.id): return
+    if await is_chat_admin(context.bot, chat.id, user.id):
+        logger.info(f"⏭️ Bypassed (admin) | chat={chat.id} user={user.id}")
+        return
+    if await db_layer.is_whitelisted(chat.id, user.id):
+        logger.info(f"⏭️ Bypassed (whitelisted) | chat={chat.id} user={user.id}")
+        return
 
     raw_payload_text = msg.text or msg.caption or ""
     filename = msg.document.file_name if msg.document else ""
@@ -734,6 +739,7 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # --- UPGRADED PROFANITY CHECK (regex + root-skeleton + fuzzy, all in one call) ---
     if rule_based_profanity_check(cleaned_text) or rule_based_profanity_check(raw_payload_text):
+        logger.info(f"🚨 Profanity matched | chat={chat.id} user={user.id} text='{raw_payload_text[:80]}'")
         await db_layer.update_user_reputation(chat.id, user.id, -10.0)
         return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Profanity / Group Policy Abuse Violation", username)
         
@@ -992,20 +998,45 @@ async def memory_janitor():
         except Exception: pass
 
 async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, msg_id: int, reason: str, username: str, immediate_ban: bool = False):
+    logger.info(f"⚔️ PUNISHMENT TRIGGERED | chat={chat_id} user={user_id} reason='{reason}' immediate_ban={immediate_ban}")
+
+    # --- Delete is now BEST-EFFORT only. A failed/blocked delete must NEVER
+    # stop the warn/mute/ban flow below — that was the bug causing the bot
+    # to silently do nothing even with full admin rights. ---
+    can_delete = False
     try:
         bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-        if not can_delete_messages(bot_member): return
-    except TelegramError: return
+        can_delete = can_delete_messages(bot_member)
+        if not can_delete:
+            logger.warning(
+                f"⚠️ Bot lacks delete permission in chat {chat_id} "
+                f"(status={getattr(bot_member, 'status', '?')}, "
+                f"can_delete_messages={getattr(bot_member, 'can_delete_messages', None)}, "
+                f"can_restrict_members={getattr(bot_member, 'can_restrict_members', None)}). "
+                f"Continuing with warn/ban anyway."
+            )
+    except TelegramError as e:
+        logger.error(f"❌ get_chat_member failed for bot in chat {chat_id}: {e}. Continuing with warn/ban anyway.")
 
-    try: await context.bot.delete_message(chat_id, msg_id)
-    except TelegramError: pass
+    if can_delete:
+        try:
+            await context.bot.delete_message(chat_id, msg_id)
+            logger.info(f"🗑️ Deleted message {msg_id} in chat {chat_id}")
+        except TelegramError as e:
+            logger.error(f"❌ delete_message failed (chat={chat_id}, msg={msg_id}): {e}")
 
     if immediate_ban:
         try:
             await context.bot.ban_chat_member(chat_id, user_id)
             await db_layer.log_action(chat_id, user_id, 0, "IMMEDIATE_BAN", reason)
             await context.bot.send_message(chat_id, f"🛑 <b>Instant Shield Ban Applied</b>\n<b>User:</b> {username}\n<b>Reason:</b> {reason}", parse_mode=ParseMode.HTML)
-        except TelegramError: pass
+            logger.info(f"🛑 Banned user {user_id} in chat {chat_id}")
+        except TelegramError as e:
+            logger.error(
+                f"❌ ban_chat_member FAILED (chat={chat_id}, user={user_id}): {e}. "
+                f"Bot ko group me 'Ban users' / 'Restrict members' permission chahiye — "
+                f"group settings me bot ka admin role kholke check kar."
+            )
         return
 
     warnings = await db_layer.add_warning_atomic(chat_id, user_id)
@@ -1021,7 +1052,11 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"❗ <i>Notice: Phantom Matrix is watching you. Next strike issues an automated permanent termination.</i>"
         )
-        await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
+        try:
+            await context.bot.send_message(chat_id, card_content, parse_mode=ParseMode.HTML)
+            logger.info(f"⚠️ Sent WARN card for user {user_id} in chat {chat_id} (warning {warnings}/2)")
+        except TelegramError as e:
+            logger.error(f"❌ Failed to send WARN card (chat={chat_id}, user={user_id}): {e}")
 
         if EDGE_TTS_AVAILABLE:
             try:
@@ -1052,7 +1087,12 @@ async def execute_local_punishment(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             await db_layer.reset_warnings_atomic(chat_id, user_id)
             ban_content = f"🛑 <b>| PERMANENT RADICAL BAN ESCALATION |</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 <b>Evicted User:</b> {username}\n❌ <b>Reason:</b> {reason} (Warning Limits Exhausted)\n📉 <b>Status:</b> Terminated from Channel Node."
             await context.bot.send_message(chat_id, ban_content, parse_mode=ParseMode.HTML)
-        except TelegramError: pass
+            logger.info(f"🛑 Banned user {user_id} in chat {chat_id} after warning limit exhausted")
+        except TelegramError as e:
+            logger.error(
+                f"❌ ban_chat_member FAILED on 2nd warning (chat={chat_id}, user={user_id}): {e}. "
+                f"Bot ko group me 'Ban users' permission chahiye."
+            )
 
 async def evaluate_via_groq(text: str) -> dict:
     if not groq_client: return {"violation": False, "action": "ignore"}
