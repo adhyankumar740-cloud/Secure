@@ -10,3 +10,4 @@ aiogram
 edge-tts
 pymongo
 motor
+rapidfuzz
