@@ -528,7 +528,7 @@ class InfrastructureInspector:
             domain = parsed.netloc.lower().removeprefix('www.')
             if domain.count('.') >= 3 and not any(d in domain for d in TRUSTED_DOMAINS):
                 return f"Suspicious sub-domain chaining: {domain}", True
-            if any(s in domain for s in ['bit.ly', 't.co', 'tinyurl', 'cutt.ly', 'linktr\.ee']):
+            if any(s in domain for s in ['bit.ly', 't.co', 'tinyurl', 'cutt.ly', 'linktr.ee']):
                 async with httpx.AsyncClient() as client:
                     res = await client.head(target_url, timeout=2.5, follow_redirects=True)
                     expanded_domain = urlparse(str(res.url)).netloc.lower().removeprefix('www.')
