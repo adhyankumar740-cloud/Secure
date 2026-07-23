@@ -69,6 +69,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") # Main Task Moderation Key
 GROQ_API_KEY_2 = os.getenv("GROQ_API_KEY_2")  # Dedicated Key for Voice Transcriptions & Daily "Trailer" Engagement
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant") 
+ENABLE_AI_AUTONOMOUS_DEFENSE = os.getenv("ENABLE_AI_AUTONOMOUS_DEFENSE", "false").lower() == "true"
 HF_API_KEY = os.getenv("HF_API_KEY")
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -821,7 +822,7 @@ async def ingestion_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return await execute_local_punishment(context, chat.id, user.id, msg.message_id, "Hindi/Hinglish Hate Speech Guard Violation (HF)", username, admin_delete_only=is_admin_user)
 
         # MAIN TASK MODERATION -> Uses groq_client (API Key 1)
-        if groq_client and len(raw_payload_text.strip()) > 8:
+        if ENABLE_AI_AUTONOMOUS_DEFENSE and groq_client and len(raw_payload_text.strip()) > 8:
             ai_res = await evaluate_via_groq(raw_payload_text)
             if ai_res.get("violation") and ai_res.get("confidence", 0) >= 80:
                 action = ai_res.get("action", "ban")
